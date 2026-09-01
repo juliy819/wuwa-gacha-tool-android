@@ -1,0 +1,1 @@
+<resources><style name="Theme.WuwaGachaTool" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#E8B84A</item><item name="android:navigationBarColor">#101214</item><item name="android:statusBarColor">#101214</item><item name="android:windowLightStatusBar">false</item></style></resources>
