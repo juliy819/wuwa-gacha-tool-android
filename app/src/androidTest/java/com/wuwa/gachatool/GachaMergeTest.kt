@@ -83,4 +83,61 @@ class GachaMergeTest {
         assertEquals(4, result.addedCount)
         assertEquals(4, dao.records(source.uid).first().size)
     }
+
+    @Test fun keepsOfficialAndMockRecordsSeparateDuringSyncMerge() = runBlocking {
+        val official = record()
+        val mock = official.copy(isMock = true, mockBatchId = "batch-1")
+        val first = dao.mergeRecords(listOf(mock))
+        val second = dao.mergeRecords(listOf(official))
+        val repeat = dao.mergeRecords(listOf(mock, official))
+        assertEquals(1, first.addedCount)
+        assertEquals(1, second.addedCount)
+        assertEquals(0, repeat.addedCount)
+        assertEquals(2, dao.records(official.uid).first().size)
+    }
+
+    @Test fun decodedSyncPayloadUsesTheTransactionalMergeAndStaysIdempotent() = runBlocking {
+        val source = record()
+        val payload = SyncEnvelope.fromGachaRecords(source.uid, listOf(source, source), "2026-09-02T00:00:00Z")
+        val decoded = SyncEnvelope.fromJson(payload.toJson()).toGachaRecords()
+        val first = dao.mergeRecords(decoded)
+        val second = dao.mergeRecords(decoded)
+        assertEquals(2, first.addedCount)
+        assertEquals(0, second.addedCount)
+        assertEquals(2, second.duplicateCount)
+        assertEquals(2, dao.records(source.uid).first().size)
+    }
+
+    @Test fun syncMergeAppliesAuthoritativeSameSecondOrder() = runBlocking {
+        val first = record(resourceId = 101)
+        val second = record(resourceId = 102)
+        dao.mergeRecords(listOf(first, second))
+        dao.mergeSyncRecords(listOf(second, first))
+        assertEquals(listOf(102L, 101L), dao.records(first.uid).first().map { it.resourceId })
+    }
+
+    @Test fun syncRepositoryMergesCloudAndReturnsUploadSnapshot() = runBlocking {
+        val local = record(resourceId = 101)
+        val cloud = record(resourceId = 102)
+        dao.mergeRecords(listOf(local))
+        val cloudPayload = SyncEnvelope.fromGachaRecords(cloud.uid, listOf(cloud), "2026-09-02T00:00:00Z").toJson().toString()
+        val result = SyncRepository(dao).applyCloud(local.uid, cloudPayload, "2026-09-02T00:00:01Z")
+        assertEquals(1, result.stats.addedCount)
+        assertEquals(2, result.envelope.records.size)
+        assertEquals(2, dao.records(local.uid).first().size)
+    }
+
+    @Test fun secureTokenStoreEncryptsRoundTripsAndClearsRefreshToken() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = SecureTokenStore(context)
+        store.clear()
+        store.saveRefreshToken("refresh-token-for-test")
+        assertEquals(true, store.hasRefreshToken())
+        assertEquals("refresh-token-for-test", store.readRefreshToken())
+        val stored = context.getSharedPreferences("onedrive_credentials", Context.MODE_PRIVATE)
+            .getString("refresh_token", "")
+        assertEquals(false, stored?.contains("refresh-token-for-test") == true)
+        store.clear()
+        assertEquals(false, store.hasRefreshToken())
+    }
 }
