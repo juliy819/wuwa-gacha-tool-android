@@ -1,14 +1,19 @@
 name: Release Android
 
+# 推送形如 v* 的 tag 触发，也可在 Actions 页面手动运行。
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: "发布版本号，例如 1.1.0"
-        required: true
+      tag:
+        description: '发布标签，例如 v1.1.0（留空则使用当前 versionName）'
+        required: false
+        default: ''
         type: string
       draft:
-        description: "创建为草稿 Release"
+        description: '创建为草稿 Release'
         required: false
         default: false
         type: boolean
@@ -22,23 +27,39 @@ concurrency:
 
 jobs:
   release:
+    name: Build and Publish Android Release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
+          ref: main
 
-      - name: Validate version and update Gradle metadata
+      - name: Resolve and validate release tag
         id: version
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z"; exit 1; }
-          TAG="v$VERSION"
-          git show-ref --tags --verify --quiet "refs/tags/$TAG" && { echo "tag already exists: $TAG"; exit 1; }
+          if [[ -n "$INPUT_TAG" ]]; then TAG="$INPUT_TAG"; elif [[ "$EVENT_NAME" == "push" ]]; then TAG="$GITHUB_REF_NAME"; else VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1); TAG="v$VERSION"; fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag '$TAG' must match vX.Y.Z"; exit 1; }
+          git fetch origin main --tags --force
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]] && git show-ref --tags --verify --quiet "refs/tags/$TAG"; then echo "Tag already exists: $TAG"; exit 1; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare version metadata
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import os, re
           from pathlib import Path
@@ -47,21 +68,34 @@ jobs:
           text = path.read_text()
           parts = [int(x) for x in version.split('.')]
           code = parts[0] * 10000 + parts[1] * 100 + parts[2]
-          text, count = re.subn(r"versionCode = \d+", f'versionCode = {code}', text, count=1)
-          if count != 1:
-              raise SystemExit("versionCode entry not found")
-          text, count = re.subn(r"versionName = \"[^\"]+\"", f'versionName = "{version}"', text, count=1)
-          if count != 1:
-              raise SystemExit("versionName entry not found")
+          text, code_count = re.subn(r"versionCode = \d+", f"versionCode = {code}", text, count=1)
+          text, name_count = re.subn(r'versionName = "[^"]+"', f'versionName = "{version}"', text, count=1)
+          if code_count != 1 or name_count != 1: raise SystemExit("versionCode/versionName entry not found")
           path.write_text(text)
           PY
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "push" ]] && ! git diff --quiet -- app/build.gradle.kts; then echo "Push-tag release requires version metadata to already match $VERSION"; git diff -- app/build.gradle.kts; exit 1; fi
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1 || true)
+          RANGE=""; [[ -n "$PREV_TAG" ]] && RANGE="$PREV_TAG..HEAD"
+          commits() { if [[ -n "$RANGE" ]]; then git log --pretty=format:'%s' --no-merges "$RANGE"; else git log --pretty=format:'%s' --no-merges; fi; }
+          FEAT=$(commits | grep -E '^feat(\([^)]*\))?!?:' | sed 's/^/- ✨ /' || true)
+          FIX=$(commits | grep -E '^fix(\([^)]*\))?!?:' | sed 's/^/- 🐛 /' || true)
+          PERF=$(commits | grep -E '^perf(\([^)]*\))?!?:' | sed 's/^/- ⚡ /' || true)
+          DOCS=$(commits | grep -E '^docs(\([^)]*\))?!?:' | sed 's/^/- 📚 /' || true)
+          MAINTENANCE=$(commits | grep -E '^(refactor|chore|ci)(\([^)]*\))?!?:' | grep -vE '^chore\(release\): bump version' | sed 's/^/- 🔧 /' || true)
+          OTHER=$(commits | grep -vE '^(feat|fix|perf|refactor|docs|ci|chore)(\([^)]*\))?!?:' | sed 's/^/- 📝 /' || true)
+          { echo "## 📦 $TAG"; echo; echo "> 🗓️ **Release Date:** $(date -u +'%Y-%m-%d')"; [[ -n "$PREV_TAG" ]] && echo "> 🔀 **Diff:** [\`$PREV_TAG...$TAG\`](https://github.com/${GITHUB_REPOSITORY}/compare/$PREV_TAG...$TAG)"; echo; for section in "✨ New Features|$FEAT" "🐛 Bug Fixes|$FIX" "⚡ Performance|$PERF" "📚 Documentation|$DOCS" "🔧 Maintenance|$MAINTENANCE" "📝 Other|$OTHER"; do title="${section%%|*}"; body="${section#*|}"; [[ -z "$body" ]] && continue; echo "### $title"; echo; echo "$body"; echo; done; [[ -z "$FEAT$FIX$PERF$DOCS$MAINTENANCE$OTHER" ]] && { echo "_No commits found since last release._"; echo; }; echo "---"; echo; echo "> ⬇️ **APK 下载文件见下方 Assets 区域**"; echo; echo "<sub>🤖 Auto-generated by GitHub Actions</sub>"; } > release-notes.md
+          cat release-notes.md
 
       - name: Set up JDK
         uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+        with: { distribution: temurin, java-version: '17' }
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -69,7 +103,8 @@ jobs:
       - name: Build and test APK
         run: ./gradlew testDebugUnitTest assembleRelease
 
-      - name: Commit version and tag
+      - name: Commit version and tag manual release
+        if: github.event_name == 'workflow_dispatch'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
@@ -77,14 +112,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle.kts
-          git commit -m "chore(release): bump version to ${TAG#v}"
+          if ! git diff --cached --quiet; then git commit -m "chore(release): bump version to ${TAG#v}"; git push origin HEAD:main; fi
           git tag "$TAG"
-          git push origin HEAD:main "$TAG"
+          git push origin "$TAG"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          draft: ${{ inputs.draft }}
-          generate_release_notes: true
+          draft: ${{ inputs.draft || false }}
+          body_path: release-notes.md
+          generate_release_notes: false
           files: app/build/outputs/apk/release/*.apk

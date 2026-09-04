@@ -1,28 +1,33 @@
-# Wuwa Gacha Tool AI 开发规范
+# Wuwa Gacha Tool Android 开发规范
 
-本文件适用于本仓库中的所有 AI 开发任务。开始工作前先阅读本文件、`README.md`、相关源码和测试；以当前代码与用户的最新要求为准，不凭旧结论猜测现状。
+本文件适用于本仓库中的 AI 开发任务。开始工作前先阅读本文件、`README.md`、相关源码和测试；以当前代码与用户最新要求为准，不凭旧结论猜测现状。
 
 ## 1. 仓库职责
 
-本项目由三个独立仓库组成，代码、产物和发布流程不得混放：
+本仓库是独立的原生 Android 客户端，负责抽卡记录导入、Room 本地持久化、Compose 展示、资源缓存、OneDrive `sync/v1` 云同步和 Android Release 产物。桌面端业务、Tauri/Rust、OCR runtime 和资源包属于同级其他仓库，不得复制到本仓库或混合发布。
 
-- 主程序：当前 `wuwa-gagha-tool` 仓库。负责 React/Tauri 界面、业务逻辑、SQLite 数据、OCR 组件调用和资源包消费。
-- OCR 组件：通常位于同级 `wuwa-gacha-tool-ocr-runtime` 仓库。负责 OCR sidecar、模型、五星头像模板、识别脚本及 `ocr-component.json` 发布产物。主程序只下载、校验和调用已发布组件，不在本仓库构建 OCR runtime。
-- 资源包：通常位于同级 `wuwa-gacha-tool-resources` 仓库。负责角色、武器目录和图片快照，以及 `resource-manifest.json` 和压缩包发布。它与主程序 Release、OCR Release 相互独立。
+跨仓库协议、数据库快照或资源清单变更，必须同时检查桌面端生产方与 Android 消费方的兼容性、失败回退和版本升级顺序。
 
-修改应落在真正拥有该职责的仓库。跨仓库协议或清单变更必须同时检查生产端与消费端的兼容性、失败回退和版本升级顺序；不得为了方便把 OCR 模型、识别实现或完整资源重新放回主程序仓库。
+## 2. 改动范围与数据边界
 
-## 2. 开始工作与改动范围
+1. 先执行只读检查：`git status --short`、相关提交历史、实现和测试，再决定修改方式。
+2. 保留用户或其他任务已有修改，不覆盖、还原、格式化或顺带提交无关文件；只暂存本任务文件。
+3. 抽卡记录必须按玩家 UID 和官方 `card_pool_type` 隔离；保留同秒多抽顺序、重复记录 occurrence、导入幂等和模拟记录语义，不跨池计算保底或统计。
+4. 数据库迁移、删除、批量导入和云端覆盖必须使用现有 Room/事务 API，并在覆盖前校验快照完整性、schema 和表结构；失败时保留本地数据。
+5. OneDrive 只保存共享数据库快照和必要元数据。不得记录 client secret、refresh token、access token 或完整抽卡 URL；令牌继续使用 Android Keystore 保护，日志不得泄露凭据、UID、路径和响应正文。
+6. 外部网络请求必须保留超时、错误处理和协议兼容性；不得通过放宽校验来掩盖远端或缓存异常。
 
-1. 先执行只读检查：查看 `git status --short`、相关提交历史、现有实现和测试，再决定修改方式。
-2. 工作区可能已有用户或其他任务的修改。不得覆盖、还原、格式化或顺带提交与当前任务无关的文件；发生重叠时先理解并保留现有改动。
-3. 每次修改围绕一个可审查的功能点。前端、Rust、测试和文档如果共同实现同一能力，应放在同一个功能提交中，不拆成零散的 `test`、样式或辅助提交。
-4. 不做未被需求驱动的重构、依赖升级、全仓格式化或生成文件刷新。临时截图、测试数据、构建产物、数据库、日志、Git bundle 和本地环境文件不得进入提交，除非任务明确要求。
-5. 用户要求诊断或评审时，默认只读取和报告证据；只有明确要求开发或修复时才修改代码。
+## 3. Android 实现约定
 
-## 3. 提交消息
+- 优先复用现有 Compose、ViewModel、Repository、Room DAO、同步状态和错误处理模式；不要为了局部 UI 引入新的架构层或依赖。
+- 遵循 Android 设计规范：支持 edge-to-edge、动态字体、暗色主题、横竖屏和 TalkBack；避免固定高度、不可滚动内容和仅依赖颜色表达状态。
+- 用户可见文案使用简洁中文；敏感输入在显示、选择、复制和错误提示中都要脱敏，但业务层继续使用原始值。
+- 新增依赖前检查现有依赖与 Android SDK 是否已能完成需求，并评估 APK 体积、离线构建和许可证影响。
+- 版本号由 `app/build.gradle.kts` 的 `versionName/versionCode` 管理；Release tag 必须是 `vX.Y.Z`，产物版本和 tag 不得不一致。
 
-提交主题使用以下格式：
+## 4. 提交消息
+
+提交主题和正文遵循：
 
 ```text
 type: 中文 summary
@@ -32,76 +37,23 @@ type: 中文 summary
 验证：实际执行的检查、测试或人工验证。
 ```
 
-要求：
+`type` 只允许 `feat`、`fix`、`perf`、`refactor`、`docs`、`ci`、`chore`，使用小写英文；冒号后为简洁中文描述，不加句号。summary 面向用户和 Release Notes，避免只写文件名或内部实现。人工提交必须有正文，不得声称未执行的验证；自动版本提交 `chore(release): bump version to x.y.z` 是唯一例外。
 
-- `type` 使用小写英文；冒号后为简洁、自然的中文能力描述，不加句号。
-- `summary` 会直接进入面向用户的 Release Notes，应优先从用户视角描述获得的能力、体验改善或问题修复，确保不了解代码的用户也能看懂；避免内部模块名、实现手段、文件名和开发过程式表述。
-- 人工提交必须有正文。正文应脱离 diff 也能说明行为变化、保护边界和验证结果；不得声称未实际执行的验证。
-- 自动版本提交 `chore(release): bump version to x.y.z` 是正文要求的唯一例外，并由 Release 工作流生成。
-- scope 默认不用。除保留的 `chore(release)` 外，只有在确实能消除歧义时才使用 `type(scope):`。
-- 不使用 `chores`、`feature`、`bug`、`ui`、`style`、`build`、`test`、`doc` 等近义前缀。
+提交前检查 `git diff --cached --stat`、`git diff --cached`、`git diff --cached --check` 和 `git status --short`。除非用户明确要求，不主动改写历史、打 tag、推送或发布。
 
-允许的类型只有：
+## 5. Release Actions 约定
 
-| 类型 | 使用场景 |
-| --- | --- |
-| `feat` | 用户可感知的新能力，或明确的产品、视觉、交互改进 |
-| `fix` | 修复错误行为、回归、兼容性或安全问题 |
-| `perf` | 在保持业务语义不变的前提下优化性能；正文写明依据和验证 |
-| `refactor` | 仅调整内部结构，用户行为与性能目标均不变 |
-| `docs` | 只修改说明文档、截图或示例文本 |
-| `ci` | GitHub Actions、构建发布流水线及其自动化逻辑 |
-| `chore` | 依赖、工具、仓库配置、内部开发或录制支持等非产品能力 |
+- `.github/workflows/release.yml` 同时支持手动触发和 `v*` tag push；普通分支 push 不得触发发布。
+- 发布前必须校验 `vX.Y.Z`、已有 tag 和源码版本一致性，并运行 `./gradlew testDebugUnitTest assembleRelease`。
+- Release Notes 从上一个版本 tag 到当前版本的提交生成，按 `feat/fix/perf/docs/refactor|chore|ci/其他` 分类；Release 使用生成的 `release-notes.md` 作为正文，并上传 `app/build/outputs/apk/release/*.apk`。
+- 手动发布需要 bump 版本时，自动提交 `chore(release): bump version to x.y.z` 并推送 main/tag；tag push 发布不得重新改写版本或移动已有 tag。
+- GitHub Actions 默认只授予完成发布所需的 `contents: write` 权限；脚本使用 `set -euo pipefail`，失败必须明确退出。
 
-分类取决于本次改动的主要目的，而不是修改了哪类文件。例如：修复页面泄露敏感信息用 `fix`；新增仅供本地录制的脱敏基础设施用 `chore`；用户可见的页面交互升级用 `feat`；单纯移动组件且行为不变才用 `refactor`。
+## 6. 验证与交付
 
-提交前必须检查 `git diff --cached --stat`、`git diff --cached` 和 `git status --short`，确认只暂存本任务文件。除非用户明确要求，不主动提交、改写历史、打 tag、推送或发布。
+按改动风险运行最小但充分的检查：
 
-## 4. 统一脱敏
-
-演示录制由 `VITE_SHARE_MODE` 控制，默认关闭。任何新增或修改的界面都必须主动检查敏感信息，不得等到页面完成后再补脱敏。
-
-敏感信息至少包括：
-
-- 玩家 UID 及可用于关联玩家身份的标识；
-- 抽卡 URL、鉴权参数、token、record id 等凭据或查询参数；
-- 本机目录、文件路径、截图文件名、日志内容及错误信息中携带的上述数据；
-- 默认导出文件名、Toast、弹窗、进度信息、复制内容和可选中的真实输入文本。
-
-前端必须复用 `src/lib/shareMode.ts` 的 `displayUid`、`displayGachaUrl`、`displayPath`、`displaySensitiveText`、`shareSafeFileToken`，输入框和文本域复用 `src/components/ShareMaskedField.tsx`。若现有函数覆盖不了新类型，应扩展统一模块并补测试或调用检查，不得在页面内临时写一套正则或假数据。
-
-脱敏只改变渲染、选择、复制和演示用文件名；查询、导入、导航、删除、数据库和 Tauri 命令必须继续接收原始值。不得把 `DEMO-*`、`***` 或截断路径写入真实数据。新增输入控件必须同时防止选中态和复制事件暴露底层真实文本。
-
-Rust 和前端日志不得记录完整抽卡 URL、鉴权字段、UID 或本机路径。Rust 日志继续通过 `src-tauri/src/logging.rs` 的统一清洗逻辑；错误传到界面前也要考虑其是否含敏感输入。
-
-涉及敏感信息的功能至少验证两种配置：默认模式保持真实业务可用，`VITE_SHARE_MODE=true` 时显示、选中、复制、Toast、弹窗、进度和导出文件名均不泄露。评审新页面时，将“脱敏覆盖检查”作为固定验收项。
-
-## 5. 数据与业务边界
-
-- 正式记录、模拟记录和 OCR/批量手动导入记录必须保留现有身份语义。OCR 结果只能在用户可编辑复核、明确选择卡池并确认写入后入库，不得把估算结果伪装成官方完整历史。
-- 抽卡记录按玩家和官方 `card_pool_type` 隔离。保底、历史起点、五星区间、统计分母和导入去重不得跨池混算；保留合法的同秒多抽顺序与重复记录语义。
-- 写入、迁移和删除优先使用现有数据库 API 与事务。可能覆盖、批量插入或删除数据时，要提供可理解的预检/确认，明确影响的玩家、卡池、记录数量和范围；已有备份失败保护不得绕过。
-- Dashboard、Records 和 Analytics 对同一指标应复用一致口径。修改概率、保底、UP/歪或历史边界前，先找到现有常量、查询和测试，不在页面中另算一套近似值。
-- 外部下载继续遵循固定 HTTPS 来源、代理回退、超时、大小限制、SHA-256、内容格式和安全解压约束。更新失败时保留最后一个有效版本；不得因远端、缓存或 CDN 猜测放宽失败保护。
-
-## 6. 实现约定
-
-- 优先复用现有 React 组件、Zustand store、Tauri command、Rust 模块和错误处理模式。只有在能消除真实重复或形成明确边界时才新增抽象。
-- 界面文案使用简洁中文并保持现有产品术语。桌面应用应优先解决实际工作流，不添加无需求依据的营销式页面、泛化仪表盘或提醒入口。
-- 新增依赖前先证明现有依赖与标准库无法合理完成任务，并检查桌面包体、离线能力、许可证和跨平台影响。
-- 用户可见行为、导入导出格式、环境变量、安装步骤或仓库职责发生变化时，同步更新 `README.md` 或示例配置。
-
-## 7. 验证与交付
-
-按风险选择最小但充分的验证集，并报告真实结果：
-
-- 前端类型检查：`npm run check`
-- 前端生产构建：`npm run build`
-- 现有专项测试：`npm run test:sync`、`npm run test:cloud-gacha`
-- Rust 格式：`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
-- Rust 检查或测试：`cargo check --manifest-path src-tauri/Cargo.toml`、`cargo test --manifest-path src-tauri/Cargo.toml`
-- 提交内容检查：`git diff --check` 或暂存后 `git diff --cached --check`
-
-只运行受影响范围所需的命令；共享业务、数据库、发布流程或跨仓库协议变更应扩大测试。`npm run lint` 当前只有在仓库已提供与 ESLint 版本匹配的配置时才作为有效门禁，不得把工具配置缺失误报为代码失败。
-
-浏览器预览可验证 React 布局和基础交互，但不能证明 Tauri 命令、原生文件选择、WebView、sidecar、安装包或本地持久化正常。报告时明确区分自动测试、浏览器检查和真实 Tauri 桌面验收；未执行的层级要如实说明。
+- 单元测试与构建：`./gradlew testDebugUnitTest assembleDebug`；Release 变更额外运行 `./gradlew testDebugUnitTest assembleRelease`。
+- Android 测试：有设备时运行 `./gradlew connectedDebugAndroidTest`，并明确报告设备条件。
+- 静态检查：`git diff --check`；workflow 修改同时验证 YAML 语法，必要时使用 `actionlint`。
+- 仅运行实际可用的命令，报告真实结果；构建通过不等于真机、OneDrive、Keystore 或 Release 上传已验证。
