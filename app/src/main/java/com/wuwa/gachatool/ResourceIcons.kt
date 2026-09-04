@@ -23,6 +23,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -90,8 +92,8 @@ private object ResourceIcons {
 fun ResourceAvatar(record: GachaRecord, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val bitmap by produceState<Bitmap?>(null, record.resourceId) { value = ResourceIcons.load(context, record.resourceId) }
-    Box(modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFF2A2F34)), contentAlignment = Alignment.Center) {
-        if (bitmap != null) Image(bitmap!!.asImageBitmap(), record.name, Modifier.size(44.dp), contentScale = ContentScale.Crop)
+    Box(modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFF2A2F34)).semantics { contentDescription = "${record.name}头像" }, contentAlignment = Alignment.Center) {
+        if (bitmap != null) Image(bitmap!!.asImageBitmap(), null, Modifier.size(44.dp), contentScale = ContentScale.Crop)
         else Text(record.name.take(1), color = Color(0xFFAEB1AA), fontSize = 14.sp, fontWeight = FontWeight.Bold)
     }
 }
