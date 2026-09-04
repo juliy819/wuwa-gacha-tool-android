@@ -11,7 +11,7 @@ val releaseKeyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS")
 val releaseKeyPassword = providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull
 
 android { namespace = "com.wuwa.gachatool"; compileSdk = 35
-    defaultConfig { applicationId = "com.wuwa.gachatool"; minSdk = 26; targetSdk = 35; versionCode = 101; versionName = "0.1.1"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"; buildConfigField("String", "ONEDRIVE_CLIENT_ID", "\"${oneDriveClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"") }
+    defaultConfig { applicationId = "com.wuwa.gachatool"; minSdk = 26; targetSdk = 35; versionCode = 102; versionName = "0.1.2"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"; buildConfigField("String", "ONEDRIVE_CLIENT_ID", "\"${oneDriveClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"") }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { buildConfig = true }
