@@ -5,11 +5,27 @@ val oneDriveClientId = providers.gradleProperty("WUWA_ONEDRIVE_CLIENT_ID")
     .orElse("5ee223c2-6d8f-48b4-ac81-1f7fe3cb9052")
     .get()
 
+val releaseStoreFile = providers.environmentVariable("ANDROID_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull
+
 android { namespace = "com.wuwa.gachatool"; compileSdk = 35
     defaultConfig { applicationId = "com.wuwa.gachatool"; minSdk = 26; targetSdk = 35; versionCode = 101; versionName = "0.1.1"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"; buildConfigField("String", "ONEDRIVE_CLIENT_ID", "\"${oneDriveClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"") }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { buildConfig = true }
+    signingConfigs {
+        create("release") {
+            if (releaseStoreFile != null && releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null) {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("release") } }
 }
 
 dependencies {

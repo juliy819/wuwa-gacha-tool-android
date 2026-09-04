@@ -100,8 +100,40 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Prepare release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KEYSTORE_BASE64" && -n "$KEYSTORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]] || {
+            echo "Missing Android release signing secrets: ANDROID_RELEASE_KEYSTORE_BASE64, ANDROID_RELEASE_STORE_PASSWORD, ANDROID_RELEASE_KEY_ALIAS, ANDROID_RELEASE_KEY_PASSWORD"
+            exit 1
+          }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-release.jks"
+          test -s "$RUNNER_TEMP/android-release.jks"
+
       - name: Build and test APK
+        env:
+          ANDROID_RELEASE_STORE_FILE: ${{ runner.temp }}/android-release.jks
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: ./gradlew testDebugUnitTest assembleRelease
+
+      - name: Verify signed APK metadata
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -1)
+          [[ -n "$APK" ]] || { echo "Release APK not found"; exit 1; }
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
+          [[ -x "$APKSIGNER" && -x "$AAPT" ]] || { echo "Android build tools are unavailable"; exit 1; }
+          "$APKSIGNER" verify --verbose "$APK"
+          "$AAPT" dump badging "$APK" | grep -E '^package: name=.com\.wuwa\.gachatool' >/dev/null
+          echo "Verified signed APK: $APK"
 
       - name: Commit version and tag manual release
         if: github.event_name == 'workflow_dispatch'
