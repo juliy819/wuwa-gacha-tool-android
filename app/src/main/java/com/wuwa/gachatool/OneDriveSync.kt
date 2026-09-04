@@ -147,19 +147,19 @@ class OneDriveSyncService(context: Context, private val repository: SyncReposito
         pending = null
     }
 
-    suspend fun sync(uid: String): CloudSyncResult = operationMutex.withLock {
+    suspend fun sync(uid: String, strategy: String? = null): CloudSyncResult = operationMutex.withLock {
         val token = accessToken()
         ensureDirectories(token)
-        syncDatabase(token)
+        syncDatabase(token, strategy)
     }
 
-    suspend fun syncAll(localUids: List<String>): CloudImportResult = operationMutex.withLock {
+    suspend fun syncAll(localUids: List<String>, strategy: String? = null): CloudImportResult = operationMutex.withLock {
         val token = accessToken(); ensureDirectories(token)
-        val result = syncDatabase(token)
+        val result = syncDatabase(token, strategy)
         CloudImportResult(repository.localUids(), result.addedCount, result.totalCount, emptyList())
     }
 
-    private suspend fun syncDatabase(token: String): CloudSyncResult {
+    private suspend fun syncDatabase(token: String, strategy: String? = null): CloudSyncResult {
         val localFile = File.createTempFile("gacha-local-", ".db", appContext.cacheDir)
         val remoteFile = File.createTempFile("gacha-remote-", ".db", appContext.cacheDir)
         try {
@@ -174,9 +174,14 @@ class OneDriveSyncService(context: Context, private val repository: SyncReposito
             }
             remoteFile.writeBytes(cloud.bytes)
             val remoteChanged = baselineEtag != cloud.etag; val localChanged = baselineHash != localHash
-            if (baselineEtag == null && before > 0) error("本机和云端都已有数据，首次连接时无法判断应保留哪一版；请先保留其中一端的数据")
-            if (baselineEtag != null && remoteChanged && localChanged) error("本机和云端数据库都已发生变化。为避免覆盖，请先保留其中一端的修改后再同步")
-            if (!remoteChanged && localChanged) {
+            if (baselineEtag == null && before > 0 && strategy !in listOf("local", "remote")) error("本机和云端都已有数据，首次连接时无法判断应保留哪一版；请先保留其中一端的数据")
+            if (baselineEtag != null && remoteChanged && localChanged && strategy !in listOf("local", "remote")) error("本机和云端数据库都已发生变化。为避免覆盖，请先保留其中一端的修改后再同步")
+            if (strategy == "remote" || (!remoteChanged && !localChanged)) {
+                val total = repository.applySnapshot(remoteFile)
+                repository.createSnapshot(localFile); saveBaseline(cloud.etag, sha256(localFile.readBytes()))
+                return CloudSyncResult((total-before).coerceAtLeast(0), 0, total, 0, 0, Instant.now().toString())
+            }
+            if (!remoteChanged && localChanged || strategy == "local") {
                 val etag = uploadSnapshot(token, localFile.readBytes(), cloud.etag); saveBaseline(etag, localHash)
                 return CloudSyncResult(0, 0, before, before, 0, Instant.now().toString())
             }
