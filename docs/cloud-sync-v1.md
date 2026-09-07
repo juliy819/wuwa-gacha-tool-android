@@ -1,13 +1,14 @@
-# Cloud Sync Protocol v1
+# OneDrive Cloud Sync Protocol v1
 
-Cloud sync transports validated record snapshots. It never uploads or replaces a SQLite database.
+Desktop and Android use the same SQLite database snapshot. The synchronized file is
+`Wuwa Gacha Tool/gacha-data.db`; it is not a per-UID JSON file.
 
 ## File layout
 
-On first sync, each client creates a visible `Wuwa Gacha Tool` directory at the OneDrive root. One file is stored per UID inside it:
+On first sync, each client creates a visible `Wuwa Gacha Tool` directory at the OneDrive root. One database file is stored inside it:
 
 ```text
-Wuwa Gacha Tool/<uid>.wuwa.json
+Wuwa Gacha Tool/gacha-data.db
 ```
 
 ## OneDrive transport
@@ -16,37 +17,14 @@ Both clients use the Microsoft consumer device-code flow as public clients. Buil
 
 The desktop client stores the refresh token in the operating-system credential vault. Android encrypts it with an Android Keystore AES-GCM key before writing the ciphertext to private preferences. Access tokens remain in memory only. Tokens, device codes, download URLs, and complete Graph responses must never be logged.
 
-Before uploading, a client downloads the current snapshot and ETag. New files use `If-None-Match: *`; existing files use `If-Match`. HTTP `409` or `412` causes a fresh download and merge, with at most three retries. A successful cloud upload is applied to the local database transactionally; if local persistence fails, the uploaded additive snapshot remains recoverable on the next sync.
-
-The JSON envelope contains `schema_version`, `uid`, `updated_at`, and `records`. Every record carries the complete merge identity: official pool ID, time, resource ID, quality, resource type, count, occurrence number, mock flag, and mock batch ID. `order_in_timestamp` preserves draw order when multiple records share one second.
+Before uploading, a client creates a consistent SQLite backup without uploading WAL or SHM files, then downloads the current snapshot and ETag. New files use `If-None-Match: *`; existing files use `If-Match`. A concurrent cloud change (`409` or `412`) stops the operation and requires a fresh sync. The local database is replaced transactionally only after the downloaded file passes size, SQLite integrity, schema, and required-table checks.
 
 ## Validation
 
-Both clients reject the complete payload before touching local data when:
+Both clients reject the downloaded file before touching local data when it exceeds the byte-size limit, fails SQLite `integrity_check`, has an unsupported schema version, or is missing required tables/columns. Unknown future schema versions fail closed and require an application update.
 
-- the schema version is unsupported;
-- the selected UID and payload UID differ;
-- a UID, pool, resource type, timestamp, count, or resource field is invalid;
-- occurrence numbers or same-second order numbers conflict or are not contiguous from zero;
-- an official record carries a mock batch ID;
-- the payload exceeds the record-count or byte-size limit.
+## Snapshot semantics
 
-Unknown future schema versions fail closed and require an application update.
+The SQLite snapshot contains shared record data, import state, and pool history boundaries. Device-only state such as game paths, resource caches, sync baselines, and credentials is not uploaded. Replacing the snapshot therefore synchronizes additions, edits, deletions, clears, and mock-record changes as one database state; it does not merge two offline database versions. If both sides changed since the common ETag/hash baseline, synchronization stops instead of applying last-writer-wins.
 
-## Merge semantics
-
-The cloud snapshot is the ordering authority for records already present at a shared pool and timestamp. Local-only records are appended in their existing order. The merged snapshot:
-
-- keeps the maximum observed multiplicity of an identical same-second record;
-- isolates records by UID and official pool ID;
-- keeps official and mock identities separate;
-- refreshes derived display fields without duplicating records;
-- normalizes occurrence and same-second order numbers;
-- applies additions and authoritative order in one local database transaction;
-- is idempotent when applied repeatedly.
-
-The merged snapshot is uploaded with the ETag returned by the download. An HTTP `412 Precondition Failed` requires downloading the new cloud snapshot, merging again, and retrying with the new ETag. A client must never resolve this conflict with last-writer-wins replacement.
-
-## Deletion boundary
-
-Version 1 is additive and does not synchronize deletions. Deletion requires a future version with durable tombstones; omitting a record from a v1 snapshot never deletes it from another device.
+The desktop and Android clients must keep the shared database schema and migrations compatible. A schema change must be implemented and tested in both clients before release.

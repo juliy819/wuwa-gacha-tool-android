@@ -20,3 +20,5 @@ $env:WUWA_ONEDRIVE_CLIENT_ID = '<client-id>'
 应用不包含客户端密钥，仅申请 `offline_access` 与 `Files.ReadWrite`。刷新令牌经 Android Keystore AES-GCM 加密后保存，访问令牌只保留在内存中。未配置 Client ID 时其余功能仍可构建和使用，云同步入口会显示不可用原因。
 
 同步使用 SQLite 数据库快照，启动时后台检查云端版本，下载后校验并事务替换共享数据表；本机与云端同时修改时会停止并提示，避免覆盖。删除、清空和模拟记录修改会随整库快照同步。协议与边界详见 [docs/cloud-sync-v1.md](docs/cloud-sync-v1.md)。
+
+四个仓库的职责、跨仓库契约和发布边界详见主程序仓库的[跨仓库契约说明](https://github.com/juliy819/wuwa-gacha-tool/blob/main/docs/cross-repository-contracts.md)。
