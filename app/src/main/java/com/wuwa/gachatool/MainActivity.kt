@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -89,7 +90,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable private fun MobileHome(db: GachaDatabase, oneDrive: OneDriveSyncService, currentUid: String, syncDisplay: MutableState<String>, dataRevision: MutableState<Int>, availableUpdate: MutableState<AndroidUpdate?>, backProgress: MutableState<Float>, backEdge: MutableState<Int>, backTouchY: MutableState<Float>, settingsOpen: MutableState<Boolean>, onUidChanged: (String) -> Unit, onCloud: () -> Unit, onImport: (String) -> Unit) {
     var uid by remember(currentUid) { mutableStateOf(currentUid) }; var pool by remember { mutableStateOf("1") }; var url by remember { mutableStateOf("") }; var showImport by remember { mutableStateOf(false) }; var showSync by remember { mutableStateOf(false) }; var message by remember { mutableStateOf("") }
-    var syncStatus by remember { mutableStateOf(oneDrive.status()) }; var deviceLogin by remember { mutableStateOf<DeviceLoginInfo?>(null) }; var syncBusy by remember { mutableStateOf(false) }; var syncMessage by remember { mutableStateOf("") }; var syncConflict by remember { mutableStateOf(false) }
+    var syncStatus by remember { mutableStateOf(oneDrive.status()) }; var deviceLogin by remember { mutableStateOf<DeviceLoginInfo?>(null) }; var syncBusy by remember { mutableStateOf(false) }; var syncMessage by remember { mutableStateOf("") }; var syncConflict by remember { mutableStateOf(false) }; var selectedInsight by remember { mutableStateOf<CharacterAcquisitionInsight?>(null) }
     val scope = rememberCoroutineScope(); val context = LocalContext.current; val revision = dataRevision.value
     val clipboard = LocalClipboardManager.current
     val availableUids by remember(revision) { db.dao().observeUids() }.collectAsState(initial = emptyList())
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
     }
     val recordsFlow = remember(uid, revision) { if (uid.isBlank()) flowOf(emptyList()) else db.dao().records(uid) }
     val records by recordsFlow.collectAsState(initial = emptyList())
+    val acquisitionInsights = remember(records) { characterAcquisitionInsights(records) }
     LaunchedEffect(deviceLogin) {
         val login = deviceLogin ?: return@LaunchedEffect
         while (deviceLogin != null && Instant.now().isBefore(login.expiresAt)) {
@@ -120,7 +122,7 @@ class MainActivity : ComponentActivity() {
             item { Overview(records, pulls, five) }
             item { Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Panel, RoundedCornerShape(14.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) { visiblePools.forEach { id -> Text(ImportParser.poolName(id), modifier = Modifier.width(116.dp).heightIn(min = 48.dp).clickable { pool = id }.background(if (pool == id) Gold.copy(alpha = .16f) else Color.Transparent, RoundedCornerShape(10.dp)).padding(vertical = 11.dp).semantics { contentDescription = ImportParser.poolName(id); stateDescription = if (pool == id) "已选中" else "未选中" }, color = if (pool == id) Gold else Muted, fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center) } } }
             val pity = currentPity(records, pool)
-            item { Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp), color = Panel, border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .07f))) { Column(Modifier.padding(vertical = 4.dp)) { if (pity > 0) CurrentPityRow(pity); if (visibleFiveStars.isEmpty()) Text("暂无${ImportParser.poolName(pool)}五星记录", modifier = Modifier.fillMaxWidth().padding(vertical = 46.dp), color = Muted, textAlign = TextAlign.Center) else visibleFiveStars.forEachIndexed { index, record -> RecordRow(record, pityForFiveStar(record, records)); if (index < visibleFiveStars.lastIndex) HorizontalDivider(color = Color.White.copy(alpha = .055f), modifier = Modifier.padding(horizontal = 10.dp)) } } } }
+            item { Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp), color = Panel, border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .07f))) { Column(Modifier.padding(vertical = 4.dp)) { if (pity > 0) CurrentPityRow(pity); if (visibleFiveStars.isEmpty()) Text("暂无${ImportParser.poolName(pool)}五星记录", modifier = Modifier.fillMaxWidth().padding(vertical = 46.dp), color = Muted, textAlign = TextAlign.Center) else visibleFiveStars.forEachIndexed { index, record -> RecordRow(record, pityForFiveStar(record, records), onClick = { selectedInsight = acquisitionInsights.firstOrNull { insight -> insight.pool == record.pool && (insight.resourceId == record.resourceId || insight.records.any { it.record.id == record.id }) } }); if (index < visibleFiveStars.lastIndex) HorizontalDivider(color = Color.White.copy(alpha = .055f), modifier = Modifier.padding(horizontal = 10.dp)) } } } }
         }
         }
         if (showSettings) SettingsScreen(
@@ -161,6 +163,7 @@ class MainActivity : ComponentActivity() {
         }
         if (syncMessage.isNotBlank()) Text(syncMessage, color = if (syncMessage.contains("失败") || syncMessage.contains("错误") || syncMessage.contains("失效")) Color(0xFFD99A9A) else Color(0xFF8FC8BE), fontSize = 12.sp, lineHeight = 18.sp)
     } } }
+    selectedInsight?.let { insight -> CharacterAcquisitionDialog(insight, onDismiss = { selectedInsight = null }) }
 }
 
 @Composable private fun SettingsIcon() { Canvas(Modifier.size(19.dp)) { val stroke = 1.6.dp.toPx(); val ys = floatArrayOf(4.dp.toPx(), 9.5.dp.toPx(), 15.dp.toPx()); val knobs = floatArrayOf(12.dp.toPx(), 6.dp.toPx(), 14.dp.toPx()); ys.forEachIndexed { index, y -> drawLine(Muted, androidx.compose.ui.geometry.Offset(2.dp.toPx(), y), androidx.compose.ui.geometry.Offset(17.dp.toPx(), y), strokeWidth = stroke); drawCircle(Ink, radius = 2.5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(knobs[index], y)); drawCircle(Muted, radius = 2.5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(knobs[index], y), style = Stroke(stroke)) } } }
@@ -248,7 +251,34 @@ private val OverviewLabelShape = GenericShape { size, _ -> moveTo(0f, 0f); lineT
 @Composable private fun PoolMetricDivider() { Box(Modifier.width(1.dp).height(25.dp).background(Color(0xFF464740))) }
 private fun syncErrorMessage(error: Throwable): String = error.message?.takeIf { it.isNotBlank() } ?: "同步失败（${error.javaClass.simpleName}）"
 @Composable private fun QuestionAvatar(modifier: Modifier = Modifier) { Box(modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFF2A2F34)).semantics { contentDescription = "垫抽记录" }, contentAlignment = Alignment.Center) { Text("?", color = Color(0xFFC8CBC5), fontSize = 22.sp, fontWeight = FontWeight.Bold) } }
-@Composable private fun RecordRow(record: GachaRecord, pityCount: Int) { Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 8.dp, vertical = 6.dp).semantics { contentDescription = "五星记录，垫抽 $pityCount 抽${if (record.offRate) "，歪" else "，命中 UP"}" }, verticalAlignment = Alignment.CenterVertically) { ResourceAvatar(record, Modifier.size(38.dp)); Box(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp).height(24.dp), contentAlignment = Alignment.CenterStart) { PityBar(pityCount, Modifier.fillMaxSize()); Text("$pityCount 抽", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(start = 9.dp, bottom = 1.dp)) }; OffRateStamp(record.offRate) } }
+@Composable private fun RecordRow(record: GachaRecord, pityCount: Int, onClick: () -> Unit = {}) { Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 6.dp).semantics { contentDescription = "五星记录，垫抽 $pityCount 抽${if (record.offRate) "，歪" else "，命中 UP"}，点击查看角色获取详情" }, verticalAlignment = Alignment.CenterVertically) { ResourceAvatar(record, Modifier.size(38.dp)); Box(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp).height(24.dp), contentAlignment = Alignment.CenterStart) { PityBar(pityCount, Modifier.fillMaxSize()); Text("$pityCount 抽", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(start = 9.dp, bottom = 1.dp)) }; OffRateStamp(record.offRate) } }
+
+@Composable private fun CharacterAcquisitionDialog(insight: CharacterAcquisitionInsight, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxWidth().padding(horizontal = 14.dp).heightIn(max = 690.dp), shape = RoundedCornerShape(12.dp), color = Panel, border = androidx.compose.foundation.BorderStroke(1.dp, Gold.copy(alpha = .28f))) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val avatar = GachaRecord(uid = "", pool = insight.pool, poolName = insight.poolName, resourceId = insight.resourceId, quality = 5, type = "role", name = insight.name, count = 1, time = "", offRate = false)
+                    ResourceAvatar(avatar, Modifier.size(48.dp))
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) { Text(insight.name, color = Text, fontSize = 18.sp, fontWeight = FontWeight.Bold); Text("${insight.poolName} · ${insight.targetCount} 次获取", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp)) }
+                    TextButton(onClick = onDismiss) { Text("关闭", color = Muted) }
+                }
+                Row(Modifier.fillMaxWidth().background(Color.White.copy(alpha = .035f)).padding(horizontal = 14.dp, vertical = 11.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    InsightMetric("获取", "${insight.targetCount} 次"); InsightMetric(if (insight.hasOffRate) "歪 / 五星" else "五星", if (insight.hasOffRate) "${insight.offRateCount} / ${insight.totalFiveStars}" else insight.totalFiveStars.toString()); InsightMetric("总抽数", "${if (insight.isLowerBound) "≥" else ""}${insight.totalPulls}"); InsightMetric("平均", insight.averagePulls?.let { "${if (insight.isLowerBound) "≥" else ""}%.1f 抽".format(it) } ?: "—")
+                }
+                Text("获取记录", color = Gold, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 14.dp, bottom = 7.dp))
+                LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    items(insight.records.asReversed()) { item ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(7.dp)).background(if (item.isOffRate) Error.copy(alpha = .08f) else Color.White.copy(alpha = .035f)).border(1.dp, if (item.isOffRate) Error.copy(alpha = .28f) else Color.White.copy(alpha = .07f), RoundedCornerShape(7.dp)).padding(horizontal = 8.dp, vertical = 7.dp).semantics { contentDescription = "${item.record.name}，${if (item.isOffRate) "前置歪，" else ""}${if (item.isLowerBound) "至少" else ""}${item.pity} 抽，第 ${item.acquisitionIndex} 次" }, verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) { Text(item.acquisitionIndex.toString().padStart(2, '0'), color = if (item.isOffRate) Error else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) }; ResourceAvatar(item.record, Modifier.size(38.dp)); Box(Modifier.weight(1f).padding(start = 12.dp).height(24.dp), contentAlignment = Alignment.CenterStart) { PityBar(item.pity, Modifier.fillMaxSize()); Text("${if (item.isLowerBound) "≥" else ""}${item.pity} 抽", color = if (item.isOffRate) Color.White else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 9.dp)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+@Composable private fun InsightMetric(label: String, value: String) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Text(label, color = Muted, fontSize = 10.sp); Text(value, color = Text, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 3.dp)) } }
 private fun formatRecordDate(value: String): String = if (value.length >= 10) value.substring(5, 10) else value
 @Composable private fun PityBar(pity: Int, modifier: Modifier = Modifier) { val progress=(pity.coerceIn(0,80)/80f); val base=when { pity >= 66 -> Color(0xFFF04F3F); pity >= 40 -> Color(0xFFF2BE42); else -> Color(0xFF22B947) }; Canvas(modifier.semantics { contentDescription = "垫抽进度 $pity 抽，共 80 抽保底" }.padding(top = 1.dp)) { val radius=androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()); drawRoundRect(Color(0xFF41443F), cornerRadius=radius); val filled=size.width*progress; clipRect(right=filled) { drawRoundRect(base, size=androidx.compose.ui.geometry.Size(filled,size.height), cornerRadius=radius); var x=-size.height; while(x<filled+size.height){ drawLine(Color.White.copy(alpha=.11f), androidx.compose.ui.geometry.Offset(x,size.height), androidx.compose.ui.geometry.Offset(x+size.height*.34f,0f), strokeWidth=10.dp.toPx()); x+=18.dp.toPx() } } } }
 @Composable private fun OffRateStamp(active: Boolean) { Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) { if (active) { Canvas(Modifier.size(28.dp).rotate(-7f)) { drawOval(Color(0x1CD84848)); drawOval(Color(0xD1D84848), style=Stroke(1.5.dp.toPx())); drawOval(Color(0xB8EC8F84), topLeft=androidx.compose.ui.geometry.Offset(3.dp.toPx(),3.dp.toPx()), size=androidx.compose.ui.geometry.Size(size.width-6.dp.toPx(),size.height-6.dp.toPx()), style=Stroke(1.dp.toPx())) }; Text("歪", color=Color(0xFFF2B0A5), fontSize=10.sp, fontWeight=FontWeight.ExtraBold, modifier=Modifier.rotate(-7f)) } } }
