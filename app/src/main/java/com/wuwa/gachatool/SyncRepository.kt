@@ -42,6 +42,7 @@ class SyncRepository(private val context: Context?, private val database: GachaD
                 "gacha_records" to "id,player_id,card_pool_type,card_pool_name,resource_id,quality_level,resource_type,name,count,time,is_off_rate,occurrence_no,order_in_timestamp,is_mock,mock_batch_id",
                 "player_import_info" to "player_id,last_imported_at,is_inferred",
                 "pool_history_boundaries" to "player_id,card_pool_type,earliest_time,earliest_time_count,confirmed_at",
+                "gacha_data_meta" to "schema_version",
             )
             expected.forEach { (table, columns) ->
                 remote.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name=?", arrayOf(table)).use { c ->
@@ -61,7 +62,7 @@ class SyncRepository(private val context: Context?, private val database: GachaD
         try {
             db.beginTransaction()
             try {
-                listOf("gacha_records", "player_import_info", "pool_history_boundaries").forEach { table ->
+                listOf("gacha_records", "player_import_info", "pool_history_boundaries", "gacha_data_meta").forEach { table ->
                     db.execSQL("DELETE FROM $table")
                     db.execSQL("INSERT INTO $table SELECT * FROM cloud.$table")
                 }

@@ -108,7 +108,17 @@ abstract class GachaDatabase : RoomDatabase() { abstract fun dao(): GachaDao
         fun create(context: Context): GachaDatabase {
             val old = context.getDatabasePath("gacha.db"); val current = context.getDatabasePath("gacha-data.db")
             if (!current.exists() && old.exists()) old.copyTo(current)
-            return Room.databaseBuilder(context, GachaDatabase::class.java, "gacha-data.db").addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+            return Room.databaseBuilder(context, GachaDatabase::class.java, "gacha-data.db")
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addCallback(object : RoomDatabase.Callback() {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("INSERT OR IGNORE INTO gacha_data_meta(schema_version) VALUES(1)")
+                    }
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        db.execSQL("INSERT OR IGNORE INTO gacha_data_meta(schema_version) VALUES(1)")
+                    }
+                })
+                .build()
         }
     }
 }
