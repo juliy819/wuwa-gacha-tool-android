@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -52,6 +53,7 @@ import java.time.Instant
 
 private val Ink = Color(0xFF101214); private val Panel = Color(0xFF191C1E); private val Gold = Color(0xFFE8B84A); private val Text = Color(0xFFE9E4D9); private val Muted = Color(0xFFB7B5AE)
 private val Success = Color(0xFF8FC8BE); private val Warning = Color(0xFFE7BD78); private val Error = Color(0xFFE5A5A5)
+private const val BACKGROUND_SYNC_COOLDOWN_MS = 5 * 60 * 1000L
 
 class MainActivity : ComponentActivity() {
     private lateinit var db: GachaDatabase
@@ -64,11 +66,13 @@ class MainActivity : ComponentActivity() {
     private val backEdge = mutableStateOf(0)
     private val backTouchY = mutableStateOf(0f)
     private val settingsOpen = mutableStateOf(false)
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); if (Build.VERSION.SDK_INT >= 34) { onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, object : android.window.OnBackAnimationCallback { override fun onBackStarted(backEvent: android.window.BackEvent) { backEdge.value = backEvent.swipeEdge; backTouchY.value = backEvent.touchY; backProgress.value = 0f }; override fun onBackProgressed(backEvent: android.window.BackEvent) { if (settingsOpen.value) backProgress.value = backEvent.progress.coerceIn(0f, 1f) }; override fun onBackCancelled() { backProgress.value = 0f }; override fun onBackInvoked() { backProgress.value = 0f; if (settingsOpen.value) settingsOpen.value = false else finish() } }) }; db = GachaDatabase.create(this); oneDrive = OneDriveSyncService(this, SyncRepository(this, db)); lifecycleScope.launch { val localUids = db.dao().uids(); activeUid.value = localUids.firstOrNull().orEmpty(); runBackgroundSync(localUids) }; lifecycleScope.launch { ResourcePack.refresh(this@MainActivity) }; lifecycleScope.launch { availableUpdate.value = AndroidUpdateService.check() }; setContent { WuwaTheme { MobileHome(db, oneDrive, activeUid.value, syncDisplay, dataRevision, availableUpdate, backProgress, backEdge, backTouchY, settingsOpen, onUidChanged = { activeUid.value = it }, onCloud = { startActivityForResult(Intent(this, CloudGachaActivity::class.java), 42) }, onImport = { importUrl(it) }) } } }
+    private var lastBackgroundSyncAt = 0L
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); if (Build.VERSION.SDK_INT >= 34) { onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, object : android.window.OnBackAnimationCallback { override fun onBackStarted(backEvent: android.window.BackEvent) { backEdge.value = backEvent.swipeEdge; backTouchY.value = backEvent.touchY; backProgress.value = 0f }; override fun onBackProgressed(backEvent: android.window.BackEvent) { if (settingsOpen.value) backProgress.value = backEvent.progress.coerceIn(0f, 1f) }; override fun onBackCancelled() { backProgress.value = 0f }; override fun onBackInvoked() { backProgress.value = 0f; if (settingsOpen.value) settingsOpen.value = false else finish() } }) }; db = GachaDatabase.create(this); oneDrive = OneDriveSyncService(this, SyncRepository(this, db)); lifecycleScope.launch { activeUid.value = db.dao().uids().firstOrNull().orEmpty() }; lifecycleScope.launch { ResourcePack.refresh(this@MainActivity) }; lifecycleScope.launch { availableUpdate.value = AndroidUpdateService.check() }; setContent { WuwaTheme { MobileHome(db, oneDrive, activeUid.value, syncDisplay, dataRevision, availableUpdate, backProgress, backEdge, backTouchY, settingsOpen, onUidChanged = { activeUid.value = it }, onCloud = { startActivityForResult(Intent(this, CloudGachaActivity::class.java), 42) }, onImport = { importUrl(it) }) } } }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (requestCode == 42 && resultCode == RESULT_OK) data?.getStringExtra("url")?.let { importUrl(it) } }
     override fun onStart() { super.onStart(); enableEdgeToEdge(); if (::oneDrive.isInitialized) scheduleBackgroundSync() }
-    private fun scheduleBackgroundSync() { lifecycleScope.launch { kotlinx.coroutines.delay(350); runBackgroundSync(db.dao().uids()) } }
-    private suspend fun runBackgroundSync(localUids: List<String>) { if (!oneDrive.status().connected) { syncDisplay.value = "未连接 OneDrive"; return }; syncDisplay.value = "正在检查云端…"; runCatching { oneDrive.syncAll(localUids) }.onSuccess { result -> activeUid.value = db.dao().uids().firstOrNull().orEmpty(); dataRevision.value += 1; syncDisplay.value = if (result.addedCount > 0) "已更新 · 共 ${result.totalCount} 条" else "已是最新 · 共 ${result.totalCount} 条" }.onFailure { syncDisplay.value = "检查失败 · 打开同步查看详情" } }
+    // 前台化会频繁触发（返回桌面再回来、Activity 因配置变化重建、从云端页面返回），用单调时钟冷却窗口去重，避免每次都打云端
+    private fun scheduleBackgroundSync(force: Boolean = false) { val now = SystemClock.elapsedRealtime(); if (!force && lastBackgroundSyncAt != 0L && now - lastBackgroundSyncAt < BACKGROUND_SYNC_COOLDOWN_MS) return; lastBackgroundSyncAt = now; lifecycleScope.launch { delay(350); runBackgroundSync(db.dao().uids()) } }
+    private suspend fun runBackgroundSync(localUids: List<String>) { if (!oneDrive.status().connected) { lastBackgroundSyncAt = 0L; syncDisplay.value = "未连接 OneDrive"; return }; syncDisplay.value = "正在检查云端…"; runCatching { oneDrive.syncAll(localUids) }.onSuccess { result -> activeUid.value = db.dao().uids().firstOrNull().orEmpty(); dataRevision.value += 1; syncDisplay.value = if (result.addedCount > 0) "已更新 · 共 ${result.totalCount} 条" else "已是最新 · 共 ${result.totalCount} 条" }.onFailure { lastBackgroundSyncAt = 0L; syncDisplay.value = "检查失败 · 打开同步查看详情" } }
     private fun importUrl(url: String) { lifecycleScope.launch {
         runCatching {
             val fetched = GachaService.importFromUrl(url)
@@ -77,7 +81,7 @@ class MainActivity : ComponentActivity() {
         }.onSuccess { (fetched, merged) ->
             activeUid.value = fetched.uid
             dataRevision.value += 1
-            scheduleBackgroundSync()
+            scheduleBackgroundSync(force = true)
             val failed = if (fetched.failedPools.isEmpty()) "" else "，${fetched.failedPools.size} 个卡池失败"
             Toast.makeText(this@MainActivity, "导入完成：新增 ${merged.addedCount} 条，重复 ${merged.duplicateCount} 条$failed", Toast.LENGTH_LONG).show()
         }.onFailure {
