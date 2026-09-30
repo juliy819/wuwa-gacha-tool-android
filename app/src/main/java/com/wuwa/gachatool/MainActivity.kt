@@ -67,13 +67,14 @@ class MainActivity : ComponentActivity() {
     private val backTouchY = mutableStateOf(0f)
     private val settingsOpen = mutableStateOf(false)
     private var lastBackgroundSyncAt = 0L
+    private var importInProgress = false
     override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); if (Build.VERSION.SDK_INT >= 34) { onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, object : android.window.OnBackAnimationCallback { override fun onBackStarted(backEvent: android.window.BackEvent) { backEdge.value = backEvent.swipeEdge; backTouchY.value = backEvent.touchY; backProgress.value = 0f }; override fun onBackProgressed(backEvent: android.window.BackEvent) { if (settingsOpen.value) backProgress.value = backEvent.progress.coerceIn(0f, 1f) }; override fun onBackCancelled() { backProgress.value = 0f }; override fun onBackInvoked() { backProgress.value = 0f; if (settingsOpen.value) settingsOpen.value = false else finish() } }) }; db = GachaDatabase.create(this); oneDrive = OneDriveSyncService(this, SyncRepository(this, db)); lifecycleScope.launch { activeUid.value = db.dao().uids().firstOrNull().orEmpty() }; lifecycleScope.launch { ResourcePack.refresh(this@MainActivity) }; lifecycleScope.launch { availableUpdate.value = AndroidUpdateService.check() }; setContent { WuwaTheme { MobileHome(db, oneDrive, activeUid.value, syncDisplay, dataRevision, availableUpdate, backProgress, backEdge, backTouchY, settingsOpen, onUidChanged = { activeUid.value = it }, onCloud = { startActivityForResult(Intent(this, CloudGachaActivity::class.java), 42) }, onImport = { importUrl(it) }) } } }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (requestCode == 42 && resultCode == RESULT_OK) data?.getStringExtra("url")?.let { importUrl(it) } }
     override fun onStart() { super.onStart(); enableEdgeToEdge(); if (::oneDrive.isInitialized) scheduleBackgroundSync() }
     // 前台化会频繁触发（返回桌面再回来、Activity 因配置变化重建、从云端页面返回），用单调时钟冷却窗口去重，避免每次都打云端
-    private fun scheduleBackgroundSync(force: Boolean = false) { val now = SystemClock.elapsedRealtime(); if (!force && lastBackgroundSyncAt != 0L && now - lastBackgroundSyncAt < BACKGROUND_SYNC_COOLDOWN_MS) return; lastBackgroundSyncAt = now; lifecycleScope.launch { delay(350); runBackgroundSync(db.dao().uids()) } }
+    private fun scheduleBackgroundSync(force: Boolean = false) { if (importInProgress) return; val now = SystemClock.elapsedRealtime(); if (!force && lastBackgroundSyncAt != 0L && now - lastBackgroundSyncAt < BACKGROUND_SYNC_COOLDOWN_MS) return; lastBackgroundSyncAt = now; lifecycleScope.launch { delay(350); if (!importInProgress) runBackgroundSync(db.dao().uids()) else lastBackgroundSyncAt = 0L } }
     private suspend fun runBackgroundSync(localUids: List<String>) { if (!oneDrive.status().connected) { lastBackgroundSyncAt = 0L; syncDisplay.value = "未连接 OneDrive"; return }; syncDisplay.value = "正在检查云端…"; runCatching { oneDrive.syncAll(localUids) }.onSuccess { result -> activeUid.value = db.dao().uids().firstOrNull().orEmpty(); dataRevision.value += 1; syncDisplay.value = if (result.addedCount > 0) "已更新 · 共 ${result.totalCount} 条" else "已是最新 · 共 ${result.totalCount} 条" }.onFailure { lastBackgroundSyncAt = 0L; syncDisplay.value = "检查失败 · 打开同步查看详情" } }
-    private fun importUrl(url: String) { lifecycleScope.launch {
+    private fun importUrl(url: String) { importInProgress = true; lifecycleScope.launch {
         runCatching {
             val fetched = GachaService.importFromUrl(url)
             val merged = db.dao().mergeRecords(fetched.records)
@@ -81,12 +82,12 @@ class MainActivity : ComponentActivity() {
         }.onSuccess { (fetched, merged) ->
             activeUid.value = fetched.uid
             dataRevision.value += 1
-            scheduleBackgroundSync(force = true)
+            lastBackgroundSyncAt = 0L
             val failed = if (fetched.failedPools.isEmpty()) "" else "，${fetched.failedPools.size} 个卡池失败"
             Toast.makeText(this@MainActivity, "导入完成：新增 ${merged.addedCount} 条，重复 ${merged.duplicateCount} 条$failed", Toast.LENGTH_LONG).show()
         }.onFailure {
             Toast.makeText(this@MainActivity, it.message ?: "导入失败", Toast.LENGTH_LONG).show()
-        }
+        }.also { importInProgress = false }
     } }
 }
 
@@ -232,11 +233,14 @@ class MainActivity : ComponentActivity() {
 private fun currentPity(records: List<GachaRecord>, pool: String): Int = records.filter { it.pool == pool }.takeWhile { it.quality != 5 }.size
 @Composable private fun CurrentPityRow(pity: Int) { Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 8.dp, vertical = 6.dp).semantics { contentDescription = "当前垫抽 $pity 抽" }, verticalAlignment = Alignment.CenterVertically) { QuestionAvatar(Modifier.size(38.dp)); Box(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp).height(24.dp), contentAlignment = Alignment.CenterStart) { PityBar(pity, Modifier.fillMaxSize()); Text("$pity 抽", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(start = 9.dp, bottom = 1.dp)) }; Spacer(Modifier.size(28.dp)) } }
 private fun pityForFiveStar(target: GachaRecord, records: List<GachaRecord>): Int {
+    val chronological = records
+        .filter { it.pool == target.pool }
+        .sortedWith(compareBy<GachaRecord> { it.time }.thenBy { it.orderInTimestamp }.thenBy { it.id })
     var found = false
     var count = 0
     // API `count` is a page-local field (often 1), so derive the pity interval
     // from the complete, pool-isolated history instead of displaying it directly.
-    for (record in records.filter { it.pool == target.pool }) {
+    for (record in chronological) {
         if (!found) {
             if (record.id == target.id) { found = true; count = 1 }
         } else {

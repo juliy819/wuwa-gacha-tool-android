@@ -30,6 +30,8 @@ private val limitedCharacterPools = setOf("1", "8", "10", "12")
 fun characterAcquisitionInsights(records: List<GachaRecord>): List<CharacterAcquisitionInsight> {
     val byPool = records.groupBy { it.pool }
     return byPool.flatMap { (pool, source) ->
+        // Room exposes records newest first. Rebuild one canonical chronological
+        // order here so pity segments are independent of the query direction.
         val chronological = source.sortedWith(compareBy<GachaRecord> { it.time }.thenBy { it.orderInTimestamp }.thenBy { it.id })
         val limitedCharacter = pool in limitedCharacterPools
         val entries = linkedMapOf<Long, MutableInsight>()

@@ -31,19 +31,27 @@ class SyncRepository(private val context: Context?, private val database: GachaD
     }
 
     suspend fun applySnapshot(source: File): Int = withContext(Dispatchers.IO) {
+        var hasMetaTable = false
         SQLiteDatabase.openDatabase(source.path, null, SQLiteDatabase.OPEN_READONLY).use { remote ->
             remote.rawQuery("PRAGMA integrity_check", null).use { cursor ->
                 require(cursor.moveToFirst() && cursor.getString(0) == "ok") { "云端数据库完整性校验失败" }
-            }
-            remote.rawQuery("SELECT schema_version FROM gacha_data_meta LIMIT 1", null).use { cursor ->
-                require(cursor.moveToFirst() && cursor.getInt(0) == 1) { "云端数据库版本不受支持" }
             }
             val expected = mapOf(
                 "gacha_records" to "id,player_id,card_pool_type,card_pool_name,resource_id,quality_level,resource_type,name,count,time,is_off_rate,occurrence_no,order_in_timestamp,is_mock,mock_batch_id",
                 "player_import_info" to "player_id,last_imported_at,is_inferred",
                 "pool_history_boundaries" to "player_id,card_pool_type,earliest_time,earliest_time_count,confirmed_at",
-                "gacha_data_meta" to "schema_version",
             )
+            hasMetaTable = remote.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                arrayOf("gacha_data_meta"),
+            ).use { it.moveToFirst() }
+            val version = if (hasMetaTable) remote.rawQuery(
+                "SELECT schema_version FROM gacha_data_meta LIMIT 1",
+                null,
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 } else 0
+            // Older desktop/Android snapshots may have no metadata row yet. Their
+            // table layout is still the v1 contract and the metadata is restored below.
+            require(version == 0 || version == 1) { "云端数据库版本不受支持: $version" }
             expected.forEach { (table, columns) ->
                 remote.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name=?", arrayOf(table)).use { c ->
                     require(c.moveToFirst()) { "云端数据库缺少必要数据表 $table" }
@@ -62,10 +70,15 @@ class SyncRepository(private val context: Context?, private val database: GachaD
         try {
             db.beginTransaction()
             try {
-                listOf("gacha_records", "player_import_info", "pool_history_boundaries", "gacha_data_meta").forEach { table ->
+                listOf("gacha_records", "player_import_info", "pool_history_boundaries").forEach { table ->
                     db.execSQL("DELETE FROM $table")
                     db.execSQL("INSERT INTO $table SELECT * FROM cloud.$table")
                 }
+                db.execSQL("DELETE FROM gacha_data_meta")
+                if (hasMetaTable) {
+                    db.execSQL("INSERT OR IGNORE INTO gacha_data_meta(schema_version) SELECT schema_version FROM cloud.gacha_data_meta")
+                }
+                db.execSQL("INSERT OR IGNORE INTO gacha_data_meta(schema_version) VALUES(1)")
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
         } finally { db.execSQL("DETACH DATABASE cloud") }

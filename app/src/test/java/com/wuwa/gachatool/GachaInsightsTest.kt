@@ -28,4 +28,15 @@ class GachaInsightsTest {
         assertEquals(1, insight.totalPulls)
         assertEquals(1, insight.targetCount)
     }
+
+    @Test fun usesStoredSameTimestampOrderInsteadOfInputOrder() {
+        val first = record(1, 3, 1, "三星", 1).copy(orderInTimestamp = 0)
+        val offRate = record(2, 5, 1104, "凌阳", 1, offRate = true).copy(orderInTimestamp = 1)
+        val target = record(3, 5, 2001, "清宵", 2).copy(orderInTimestamp = 0)
+        val insight = characterAcquisitionInsights(listOf(target, offRate, first)).single()
+
+        assertEquals(listOf("凌阳", "清宵"), insight.records.map { it.record.name })
+        assertEquals(listOf(2, 1), insight.records.map { it.pity })
+        assertEquals(3, insight.totalPulls)
+    }
 }
