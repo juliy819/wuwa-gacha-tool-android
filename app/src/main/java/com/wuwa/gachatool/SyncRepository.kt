@@ -11,6 +11,57 @@ import org.json.JSONObject
 
 data class SyncApplyResult(val envelope: SyncEnvelope, val stats: MergeStats)
 
+/** 覆盖本机前的预检结果：只用于告知用户会丢掉什么，不修改任何数据。 */
+data class SyncApplyPreview(
+    val lostCount: Int,
+    val lostEarliest: String?,
+    val lostLatest: String?,
+    val localCount: Int,
+    val remoteCount: Int,
+)
+
+/**
+ * 覆盖前预检用的比对语句：按“记录身份”聚合后比较条数差，因此同一秒多条
+ * 完全相同记录只少了一部分的情况也能算准；身份口径与 mergeRecords 一致
+ * （不含 occurrenceNo，因为它会随来源顺序重新编号）。
+ */
+private const val SYNC_APPLY_PREVIEW_SQL = """
+    WITH local_counts AS (
+        SELECT player_id, card_pool_type, time, resource_id, quality_level, resource_type,
+               count, is_mock, COALESCE(mock_batch_id, '') AS batch, COUNT(*) AS hits
+        FROM main.gacha_records
+        GROUP BY player_id, card_pool_type, time, resource_id, quality_level, resource_type,
+                 count, is_mock, batch
+    ),
+    remote_counts AS (
+        SELECT player_id, card_pool_type, time, resource_id, quality_level, resource_type,
+               count, is_mock, COALESCE(mock_batch_id, '') AS batch, COUNT(*) AS hits
+        FROM cloud.gacha_records
+        GROUP BY player_id, card_pool_type, time, resource_id, quality_level, resource_type,
+                 count, is_mock, batch
+    )
+    SELECT
+        COALESCE(SUM(MAX(local_counts.hits - COALESCE(remote_counts.hits, 0), 0)), 0),
+        MIN(CASE WHEN local_counts.hits > COALESCE(remote_counts.hits, 0) THEN local_counts.time END),
+        MAX(CASE WHEN local_counts.hits > COALESCE(remote_counts.hits, 0) THEN local_counts.time END),
+        (SELECT COUNT(*) FROM main.gacha_records),
+        (SELECT COUNT(*) FROM cloud.gacha_records)
+    FROM local_counts
+    LEFT JOIN remote_counts
+        ON local_counts.player_id = remote_counts.player_id
+       AND local_counts.card_pool_type = remote_counts.card_pool_type
+       AND local_counts.time = remote_counts.time
+       AND local_counts.resource_id = remote_counts.resource_id
+       AND local_counts.quality_level = remote_counts.quality_level
+       AND local_counts.resource_type = remote_counts.resource_type
+       AND local_counts.count = remote_counts.count
+       AND local_counts.is_mock = remote_counts.is_mock
+       AND local_counts.batch = remote_counts.batch
+"""
+
+/** 同步备份的保留份数，避免长期占用手机存储。 */
+private const val SYNC_BACKUP_RETENTION = 3
+
 class SyncRepository(private val context: Context?, private val database: GachaDatabase?, private val legacyDao: GachaDao? = null) {
     constructor(context: Context, database: GachaDatabase) : this(context, database, null)
     constructor(dao: GachaDao) : this(null, null, dao)
@@ -30,7 +81,27 @@ class SyncRepository(private val context: Context?, private val database: GachaD
         target
     }
 
-    suspend fun applySnapshot(source: File): Int = withContext(Dispatchers.IO) {
+    /**
+     * 覆盖本机前的整库备份。失败必须中止覆盖，否则一次误覆盖就无法挽回。
+     * 只保留最近 [SYNC_BACKUP_RETENTION] 份，避免长期占用手机空间。
+     */
+    suspend fun backupBeforeApply(): File? = withContext(Dispatchers.IO) {
+        val dir = File(requireNotNull(context).filesDir, "sync-backups")
+        dir.mkdirs()
+        val target = File(dir, "gacha-data-before-sync-${System.currentTimeMillis()}.db")
+        createSnapshot(target)
+        dir.listFiles { file -> file.name.startsWith("gacha-data-before-sync-") }
+            ?.sortedByDescending { it.name }
+            ?.drop(SYNC_BACKUP_RETENTION)
+            ?.forEach { it.delete() }
+        target
+    }
+
+    /**
+     * 校验云端快照的结构兼容性。覆盖与覆盖前预检共用同一套规则，
+     * 保证预检通过就意味着覆盖可以真正执行；返回快照是否带元数据表。
+     */
+    private fun validateSnapshot(source: File): Boolean {
         var hasMetaTable = false
         SQLiteDatabase.openDatabase(source.path, null, SQLiteDatabase.OPEN_READONLY).use { remote ->
             remote.rawQuery("PRAGMA integrity_check", null).use { cursor ->
@@ -65,6 +136,41 @@ class SyncRepository(private val context: Context?, private val database: GachaD
                 }
             }
         }
+        return hasMetaTable
+    }
+
+    /**
+     * 覆盖本机前的预检：本机会丢掉哪些记录、丢的是哪个时间段。
+     * 只读取与比对，不写入任何数据。
+     */
+    suspend fun previewApply(source: File): SyncApplyPreview = withContext(Dispatchers.IO) {
+        validateSnapshot(source)
+        val db = requireNotNull(database).openHelper.writableDatabase
+        db.execSQL("ATTACH DATABASE ? AS cloud", arrayOf(source.path))
+        try {
+            // Room 的 SupportSQLiteDatabase 走 query(SimpleSQLiteQuery)，
+            // 与 createSnapshot 一样，不能直接调框架的 rawQuery。
+            db.query(SimpleSQLiteQuery(SYNC_APPLY_PREVIEW_SQL)).use { cursor ->
+                // 聚合查询一定返回一行；取不到时按“没有丢”处理，不阻断同步。
+                if (cursor.moveToFirst()) {
+                    SyncApplyPreview(
+                        lostCount = cursor.getInt(0).coerceAtLeast(0),
+                        lostEarliest = cursor.getString(1),
+                        lostLatest = cursor.getString(2),
+                        localCount = cursor.getInt(3),
+                        remoteCount = cursor.getInt(4),
+                    )
+                } else {
+                    SyncApplyPreview(0, null, null, 0, 0)
+                }
+            }
+        } finally {
+            db.execSQL("DETACH DATABASE cloud")
+        }
+    }
+
+    suspend fun applySnapshot(source: File): Int = withContext(Dispatchers.IO) {
+        val hasMetaTable = validateSnapshot(source)
         val db = requireNotNull(database).openHelper.writableDatabase
         db.execSQL("ATTACH DATABASE ? AS cloud", arrayOf(source.path))
         try {

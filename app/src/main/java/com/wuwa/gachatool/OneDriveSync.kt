@@ -31,10 +31,91 @@ private const val SYNC_ROOT_NAME = "Wuwa Gacha Tool"
 private const val MAX_SYNC_BYTES = 256 * 1024 * 1024
 private const val SYNC_DATABASE_NAME = "gacha-data.db"
 
+/**
+ * 取云端快照是网络操作，期间本机可能被导入/编辑改写；每次决策前都要重新
+ * 生成本机快照确认没有变化，连续变化时最多重决策这么多次。
+ */
+private const val MAX_SYNC_RESTARTS = 3
+
 data class OneDriveStatus(val configured: Boolean, val connected: Boolean, val loginPending: Boolean)
 data class DeviceLoginInfo(val userCode: String, val verificationUri: String, val expiresAt: Instant, val intervalSeconds: Long)
-data class CloudSyncResult(val addedCount: Int, val duplicateCount: Int, val totalCount: Int, val uploadedCount: Int, val conflictRetries: Int, val updatedAt: String)
-data class CloudImportResult(val uids: List<String>, val addedCount: Int, val totalCount: Int, val failures: List<String>)
+data class CloudSyncResult(
+    val addedCount: Int,
+    val duplicateCount: Int,
+    val totalCount: Int,
+    val uploadedCount: Int,
+    val conflictRetries: Int,
+    val updatedAt: String,
+    /** 本次用云端快照覆盖本机时丢掉的本机记录数（0 表示没有丢）。 */
+    val lostCount: Int = 0,
+    /** 被丢弃记录的时间范围，用于向用户说明影响。 */
+    val lostEarliest: String? = null,
+    val lostLatest: String? = null,
+    /** 覆盖前自动留下的本机整库备份路径。 */
+    val backupPath: String? = null,
+)
+data class CloudImportResult(
+    val uids: List<String>,
+    val addedCount: Int,
+    val totalCount: Int,
+    val failures: List<String>,
+    /** 云端覆盖本机时丢掉的本机记录数（0 表示没有丢）。 */
+    val lostCount: Int = 0,
+    val lostEarliest: String? = null,
+    val lostLatest: String? = null,
+    /** 覆盖前自动留下的本机整库备份路径。 */
+    val backupPath: String? = null,
+)
+
+/**
+ * 云同步的方向决策。输入全部是“同步窗口内的当前状态”，函数本身不做任何 IO，
+ * 便于用单测覆盖全部分支；任何会覆盖本机的写入都必须发生在这个决策之后的
+ * 同一次执行里（并已确认本机没有变化）。
+ */
+internal enum class SyncAction {
+    /** 两端自上次同步以来都没有变化，本机数据库不需要改动。 */
+    Keep,
+
+    /** 云端有更新、本机没变：用云端快照覆盖本机。 */
+    ApplyRemote,
+
+    /** 本机有更新、云端没变：把本机快照推送到云端。 */
+    UploadLocal,
+
+    /** 首次连接且两端都有数据，无法自动判断该保留哪一端。 */
+    FirstConnectConflict,
+
+    /** 两端在最后一次同步之后都发生了变化，交给用户选择。 */
+    BothChangedConflict,
+}
+
+internal fun decideSyncAction(
+    baselineEtag: String?,
+    baselineHash: String?,
+    localHash: String,
+    localCount: Int,
+    remoteEtag: String,
+    strategy: String?,
+): SyncAction {
+    val remoteChanged = baselineEtag != remoteEtag
+    val localChanged = baselineHash != localHash
+    val explicit = strategy == "local" || strategy == "remote"
+    if (baselineEtag == null && localCount > 0 && !explicit) return SyncAction.FirstConnectConflict
+    if (baselineEtag != null && remoteChanged && localChanged && !explicit) return SyncAction.BothChangedConflict
+    return when (strategy) {
+        "remote" -> SyncAction.ApplyRemote
+        "local" -> SyncAction.UploadLocal
+        // 两端都没变时不再无脑重放云端快照：那是一次没有任何收益、
+        // 却足以抹掉同步窗口内新写入记录的整库覆盖。
+        else -> when {
+            !remoteChanged && !localChanged -> SyncAction.Keep
+            !remoteChanged && localChanged -> SyncAction.UploadLocal
+            remoteChanged && !localChanged -> SyncAction.ApplyRemote
+            // 只剩“首次连接且本机为空”这一种情况：以云端为准拉取。
+            else -> SyncAction.ApplyRemote
+        }
+    }
+}
 enum class LoginPollResult { PENDING, CONNECTED }
 
 private data class PendingLogin(val deviceCode: String, val info: DeviceLoginInfo)
@@ -156,39 +237,92 @@ class OneDriveSyncService(context: Context, private val repository: SyncReposito
     suspend fun syncAll(localUids: List<String>, strategy: String? = null): CloudImportResult = operationMutex.withLock {
         val token = accessToken(); ensureDirectories(token)
         val result = syncDatabase(token, strategy)
-        CloudImportResult(repository.localUids(), result.addedCount, result.totalCount, emptyList())
+        CloudImportResult(
+            repository.localUids(),
+            result.addedCount,
+            result.totalCount,
+            emptyList(),
+            lostCount = result.lostCount,
+            lostEarliest = result.lostEarliest,
+            lostLatest = result.lostLatest,
+            backupPath = result.backupPath,
+        )
     }
 
     private suspend fun syncDatabase(token: String, strategy: String? = null): CloudSyncResult {
         val localFile = File.createTempFile("gacha-local-", ".db", appContext.cacheDir)
         val remoteFile = File.createTempFile("gacha-remote-", ".db", appContext.cacheDir)
+        val verifyFile = File.createTempFile("gacha-verify-", ".db", appContext.cacheDir)
         try {
+            // 1) 本机快照 + 上次同步基线。之后下载云端快照可能耗时数秒，
+            //    这段时间里本机仍可被导入改写，因此这份状态不能直接当结论用。
             repository.createSnapshot(localFile)
-            val before = repository.recordCount(); val localHash = sha256(localFile.readBytes())
-            val baselineEtag = syncState.getString("etag", null); val baselineHash = syncState.getString("snapshot_sha256", null)
+            val baselineEtag = syncState.getString("etag", null)
+            val baselineHash = syncState.getString("snapshot_sha256", null)
+            var localHash = sha256(localFile.readBytes())
+            var localCount = repository.recordCount()
             val cloud = downloadSnapshot(token)
             if (cloud == null) {
                 val etag = uploadSnapshot(token, localFile.readBytes(), null)
                 saveBaseline(etag, localHash)
-                return CloudSyncResult(0, 0, before, before, 0, Instant.now().toString())
+                return CloudSyncResult(0, 0, localCount, localCount, 0, Instant.now().toString())
             }
             remoteFile.writeBytes(cloud.bytes)
-            val remoteChanged = baselineEtag != cloud.etag; val localChanged = baselineHash != localHash
-            if (baselineEtag == null && before > 0 && strategy !in listOf("local", "remote")) error("本机和云端都已有数据，首次连接时无法判断应保留哪一版；请先保留其中一端的数据")
-            if (baselineEtag != null && remoteChanged && localChanged && strategy !in listOf("local", "remote")) error("本机和云端数据库都已发生变化。为避免覆盖，请先保留其中一端的修改后再同步")
-            if (strategy == "remote" || (!remoteChanged && !localChanged)) {
-                val total = repository.applySnapshot(remoteFile)
-                repository.createSnapshot(localFile); saveBaseline(cloud.etag, sha256(localFile.readBytes()))
-                return CloudSyncResult((total-before).coerceAtLeast(0), 0, total, 0, 0, Instant.now().toString())
+
+            var attempt = 0
+            while (attempt < MAX_SYNC_RESTARTS) {
+                // 2) 覆盖本机不可逆：先用“此刻”的本机快照确认同步窗口内没有变化。
+                repository.createSnapshot(verifyFile)
+                val currentHash = sha256(verifyFile.readBytes())
+                if (currentHash != localHash) {
+                    // 本机变了（导入/编辑/删除）：旧判断作废，用新状态重新决策。
+                    localHash = currentHash
+                    localCount = repository.recordCount()
+                    attempt += 1
+                    continue
+                }
+                when (decideSyncAction(baselineEtag, baselineHash, localHash, localCount, cloud.etag, strategy)) {
+                    SyncAction.Keep -> return CloudSyncResult(0, 0, localCount, localCount, 0, Instant.now().toString())
+
+                    SyncAction.ApplyRemote -> {
+                        val preview = repository.previewApply(remoteFile)
+                        // 覆盖前必须留底：整库替换没有任何撤销手段。
+                        val backup = if (localCount > 0) repository.backupBeforeApply() else null
+                        val total = repository.applySnapshot(remoteFile)
+                        repository.createSnapshot(localFile)
+                        saveBaseline(cloud.etag, sha256(localFile.readBytes()))
+                        return CloudSyncResult(
+                            addedCount = (total - localCount).coerceAtLeast(0),
+                            duplicateCount = 0,
+                            totalCount = total,
+                            uploadedCount = 0,
+                            conflictRetries = 0,
+                            updatedAt = Instant.now().toString(),
+                            lostCount = preview.lostCount,
+                            lostEarliest = preview.lostEarliest,
+                            lostLatest = preview.lostLatest,
+                            backupPath = backup?.absolutePath,
+                        )
+                    }
+
+                    SyncAction.UploadLocal -> {
+                        // 上传的是刚校验过的这份内容；若上传期间本机又有新数据，
+                        // 基线记录的仍是真正上传的哈希，下次同步会重新上传，
+                        // 而不是被误判成“已同步”。
+                        val etag = uploadSnapshot(token, verifyFile.readBytes(), cloud.etag)
+                        saveBaseline(etag, localHash)
+                        return CloudSyncResult(0, 0, localCount, localCount, 0, Instant.now().toString())
+                    }
+
+                    SyncAction.FirstConnectConflict -> error("本机和云端都已有数据，首次连接时无法判断应保留哪一版；请先保留其中一端的数据")
+
+                    SyncAction.BothChangedConflict -> error("本机和云端数据库都已发生变化。为避免覆盖，请先保留其中一端的修改后再同步")
+                }
             }
-            if (!remoteChanged && localChanged || strategy == "local") {
-                val etag = uploadSnapshot(token, localFile.readBytes(), cloud.etag); saveBaseline(etag, localHash)
-                return CloudSyncResult(0, 0, before, before, 0, Instant.now().toString())
-            }
-            val total = repository.applySnapshot(remoteFile)
-            repository.createSnapshot(localFile); saveBaseline(cloud.etag, sha256(localFile.readBytes()))
-            return CloudSyncResult((total-before).coerceAtLeast(0), 0, total, 0, 0, Instant.now().toString())
-        } finally { localFile.delete(); remoteFile.delete() }
+            error("本机数据在同步过程中持续变化，已停止本次云同步，请稍后重试")
+        } finally {
+            localFile.delete(); remoteFile.delete(); verifyFile.delete()
+        }
     }
 
     private fun saveBaseline(etag:String, hash:String) { check(syncState.edit().putString("etag",etag).putString("snapshot_sha256",hash).commit()) }
